@@ -1,0 +1,181 @@
+public class FoodController {
+    @AuraEnabled(Cacheable=true)
+    public static OrderWrapper orderDetails(String orderId){
+        Order__c orderinfo = [SELECT Id, Name, User__c, Ship_To_Address__c, subTotal__c,Ship_To_Address__r.Street__c, Ship_To_Address__r.City__c,
+                              Ship_To_Address__r.Country__c,
+                              Ship_To_Address__r.State__c,
+                              Ship_To_Address__r.Postal_Code__c,(SELECT Id,Name,Menu__r.Name,Qnty__c,Item_Price__c From Order_Items__r) FROM Order__c Where id =: orderId];
+        OrderWrapper wrapper = new OrderWrapper();
+        wrapper.order = orderinfo;
+        wrapper.Orderitems = orderinfo.Order_items__r;
+        return wrapper;
+    }
+    @AuraEnabled
+    public static Order__c createOrder(String cartId, string addressId, Decimal totalAmount){
+        Order__c orderInfo = new Order__c();
+        orderInfo.User__c = UserInfo.getUserId();
+        orderInfo.Cart__c = cartId;
+        orderInfo.Ship_To_Address__c = addressId;
+        orderInfo.subTotal__c = totalAmount;
+        insert orderInfo; 
+        List<Cart_items__c> cartItems = (List<Cart_items__c>)JSON.deserialize(getItems(cartId),
+                                                                              List<Cart_items__c>.class);
+        List<Order_items__c> orderItems = new List<Order_items__c>();
+        For (Cart_items__c item : cartItems){
+            Order_items__c oItem = new Order_items__c();
+            oItem.Menu__c = item.Menu__c;
+            oItem.Related_Order__c = orderInfo.Id;
+            oItem.Qnty__c = item.Qnty__c;
+            oItem.Item_Price__c = item.Amount__c;
+            orderItems.add(oItem);
+        }
+        insert orderItems; 
+        Cart__c cart = new Cart__c();
+        cart.Id = cartId;
+        cart.Cart_Status__c = 'Closed';
+        cart.Active__c = false;
+        update cart;
+        Order__c order = [Select Id, Name From Order__c Where Id =:orderInfo.Id];
+        return order;
+    }
+    @AuraEnabled
+    public static Address_Book__c saveAddress(String addressDetails){
+        // {City__c : '', State__c : ''}
+        Address_Book__c addressInfo = (Address_Book__c)JSON.deserialize(addressDetails,
+                                                                        Address_Book__c.class);
+       
+        addressInfo.User__c = UserInfo.getUserId();
+        insert addressInfo;
+        return addressInfo;
+    }
+    @AuraEnabled
+    public static List<Address_Book__c> addressDetails(){
+        List<Address_Book__c> addressList = [SELECT Id, City__c, Country__c, 
+                                             Postal_Code__c, State__c, 
+                                             Streer__c, User__c 
+                                             FROM Address_Book__c
+                                             Where User__c != null 
+                                             AND User__c =: UserInfo.getUserId()];
+        return addressList;
+    }
+    @AuraEnabled
+    public static string getItems(String cartId){
+        List<Cart_items__c> items = [Select Id, Name, Menu__c, Cart__c, 
+                                     Qnty__c, Amount__c,
+                                     Total_Amount__c,
+                                     Menu__r.Name
+                                     FROM Cart_items__c
+                                     Where Cart__c =: cartId];
+        return JSON.serialize(items);
+    }
+    
+    @AuraEnabled
+    public static Coupon__c couponInfo(String name){
+        Coupon__c Coupon = getCouponInformation(name);
+        return Coupon;
+    }
+    public static Coupon__c getCouponInformation(String name){
+        Coupon__c couponRec = [Select Id, Name, 
+                               Price__c 
+                               FROM Coupon__c 
+                               Where Expired__c = false
+                               AND (Remaining_Quantity_c__c > 0 OR Name ='Default')
+                               AND Name =: name];
+        return couponRec;
+    }
+    @AuraEnabled
+    public static string createCartItems(String CartId, String MenuId, Decimal Amount){
+        Cart_items__c item = new Cart_items__c();
+        Map<Id, Cart_items__c> cartItemsMap = getCartItems(CartId);
+        if ( cartItemsMap.containsKey(MenuId) ) {
+            item = cartItemsMap.get(MenuId);
+            item.Qnty__c = item.Qnty__c + 1;
+            update item;
+        } else {
+            item.Menu__c = MenuId;
+            item.Cart__c = CartId;
+            item.Qnty__c = 1;
+            item.Amount__c = Amount;
+            insert item;
+        }
+        
+        return item.Id;
+    }
+    public Static Map<Id, Cart_items__c> getCartItems(String cartId){
+        /* beerId, Cart_Iems*/
+        Map<Id, Cart_items__c> cartItemsMap = new Map<Id, Cart_items__c>();
+        for ( Cart_items__c cart : [Select Id, Name, Menu__c, Cart__c, 
+                                    Qnty__c, Amount__c
+                                    FROM Cart_items__c
+                                    Where Cart__c =: cartId]) {
+                                        cartItemsMap.put(cart.Menu__c, cart);
+                                    }
+        return cartItemsMap;
+    }
+    @AuraEnabled(cacheable=false)
+    public static string getCartId(){
+        List<Cart__c> cartInfo = [ Select Id, Name 
+                                  FROM Cart__c 
+                                  Where User__c =: UserInfo.getUserId()
+                                  AND Cart_Status__c = 'Open'
+                                  AND Active__c = true];
+        if (cartInfo != null && cartInfo.size() > 0) {
+            List<Cart_items__c> cartItems = new list<Cart_items__c>();
+            cartItems = [Select Id, Name, Menu__c, Cart__c, Qnty__c, Amount__c
+                         FROM Cart_items__c
+                         Where Cart__c =: cartInfo.get(0).Id];
+            
+            Decimal itemQnty = 0;
+            for (Cart_items__c item : cartItems) {
+                itemQnty = itemQnty + item.Qnty__c;
+            }
+            CartWrapper wrapper = new CartWrapper();
+            wrapper.CartId = cartInfo.get(0).Id;
+            wrapper.items = cartItems;
+            wrapper.Count = itemQnty;
+            return JSON.serialize(wrapper);
+        } else { 
+            Cart__c defaultCart = new Cart__c();
+            Coupon__c coupon = getCouponInformation('Default');
+            defaultCart.Cart_Id__c = String.valueOf(Math.random());
+            defaultCart.Cart_Status__c = 'Open';
+            defaultCart.Active__c = true;
+            defaultCart.Coupon__c = coupon.Id;
+            defaultCart.User__c = UserInfo.getUserId();
+            insert defaultCart;
+            CartWrapper wrapper = new CartWrapper();
+            wrapper.CartId = defaultCart.Id;
+            wrapper.items = null;
+            wrapper.Count = 0;
+            return JSON.serialize(wrapper);
+        } 
+    }
+    @AuraEnabled(cacheable=true)
+    public static List<sObject> searchBeer(String searchParam){
+        String likeParam = '%' +searchParam+'%';
+        String Query = '';
+ 
+        if(searchParam != null){
+            Query = 'Select Id, Name,Price__c,image_URL__c, Total_Quantity__c From Menu__c Where Name Like :likeParam LIMIT 50 ';
+        }else{
+            Query = 'Select Id, Name,Price__c,image_URL__c, Total_Quantity__c From Menu__c LIMIT 50 '; 
+        }
+        
+        List<SObject> sObjectList = Database.query(Query);
+        return sObjectList;
+    }
+    public class CartWrapper {
+        @AuraEnabled
+        public String CartId { get; set; }
+        @AuraEnabled
+        public Decimal Count { get; set; }
+        @AuraEnabled
+        public List<Cart_items__c> items { get; set; }
+    }
+    public class OrderWrapper {
+        @AuraEnabled
+        public Order__c order { get; set; }
+        @AuraEnabled
+        public List<Order_items__c> Orderitems { get; set; }
+    }
+}
